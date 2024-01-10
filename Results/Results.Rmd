@@ -1,0 +1,656 @@
+---
+title: "Preliminary Analysis of TEMS Diversity Survey"
+author: "Grayson Meckfessel"
+output: pdf_document
+execute:
+  freeze: auto
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, fig.width = 6, fig.height = 4, warning = FALSE)
+library(dplyr)
+library(glmnet)
+library(tidyverse)
+library(ggplot2)
+library(MASS)
+library(lme4) 
+library(effsize)
+library(coin) 
+library(boot)
+```
+
+*All code is omitted in this report for the sake of brevity. Original code can be viewed in Analysis at <https://github.com/graysonmeckfessel/diversity-survey-2023>. For original CSV data file, reach out to repository owner.*
+
+```{r}
+# Importing the complete data file
+raw_data <- read.csv("/Users/graysonmeckfessel/desktop/repos/diversity-survey/Analysis/raw_data_complete_2023.csv")
+
+# Filtering out incomplete surveys according to "survey ends" criteria
+completed_surveys <- subset(raw_data, 
+                        Progress == "100" &
+                        Finished == "True" &
+                        Q1 == "I understand the consent form and consent to participate in this survey" &
+                        (Q2 == "Undergraduate Student" | Q2 == "Graduate Student") &
+                        Q3 == "Yes" &
+                        Q4 == "Yes")
+
+# Re-code chief complaint questions
+completed_surveys <- completed_surveys %>%
+  mutate(across(c(Q19_1, Q19_2, Q19_3, Q19_4, Q20_1, Q20_2, Q20_3, Q20_4, Q21_1, 
+                  Q21_2, Q21_3, Q21_4, Q22_1, Q22_2, Q22_3, Q22_4, Q23_1, Q23_2, 
+                  Q23_3, Q23_4),
+                ~ case_when(
+                    . == "Very unlikely" ~ 1,
+                    . == "Unlikely" ~ 2,
+                    . == "About as likely as not" ~ 3,
+                    . == "Likely" ~ 4,
+                    . == "Very likely" ~ 5,
+                    TRUE ~ NA_real_)))  # Handle other cases as NA
+
+# Converting Demographically Data For Increased Usability
+usable_data <- completed_surveys %>%
+  mutate(
+    Q32 = ifelse(Q32 == "White", "White", "Non-White"),
+    Q33 = ifelse(Q33 == "Straight (Heterosexual)", "Heterosexual", "Non-Heterosexual"),
+    Q34 = ifelse(Q34 %in% c("Man or Male", "Woman or Female"), Q34, "Non-Cisgender"),
+    Q36 = ifelse(Q36 == "Yes", "International Student", "Non-International Student")
+  )
+
+# Writing Dictionary for Later Use
+question_dictionary <- data.frame(
+  ColumnName = c("Q19_1", "Q19_2", "Q19_3", "Q19_4", 
+                 "Q20_1", "Q20_2", "Q20_3", "Q20_4", 
+                 "Q21_1", "Q21_2", "Q21_3", "Q21_4", 
+                 "Q22_1", "Q22_2", "Q22_3", "Q22_4", 
+                 "Q23_1", "Q23_2", "Q23_3", "Q23_4"),
+  QuestionText = c("Call 911 for a minor traumatic emergency",
+                   "Call for Tulane EMS for a minor traumatic emergency",
+                   "Take transportation to see a doctor for a minor traumatic emergency",
+                   "Care for yourself for a minor traumatic emergency",
+                   "Call 911 for a minor medical emergency",
+                   "Call for Tulane EMS for a minor medical emergency",
+                   "Take transportation to see a doctor for a minor medical emergency",
+                   "Care for yourself for a minor medical emergency",
+                   "Call 911 for a psychological emergency",
+                   "Call for Tulane EMS for a psychological emergency",
+                   "Take transportation to see a doctor for a psychological emergency",
+                   "Care for yourself for a psychological emergency",
+                   "Call 911 for an ingestion emergency",
+                   "Call for Tulane EMS for an ingestion emergency",
+                   "Take transportation to see a doctor for an ingestion emergency",
+                   "Care for yourself for an ingestion emergency",
+                   "Call 911 for a cardiovascular emergency",
+                   "Call for Tulane EMS for a cardiovascular emergency",
+                   "Take transportation to see a doctor for a cardiovascular emergency",
+                   "Care for yourself for a cardiovascular emergency")
+)
+
+demographic_dictionary <- data.frame(
+  DemographicCode = c("Q31", "Q32", "Q33", "Q34", "Q35", "Q36"),
+  DemographicText = c("Year at Tulane",
+                      "Racial Identity",
+                      "Sexual Orientation",
+                      "Gender Identity",
+                      "School of Primary Study",
+                      "International Student")
+)
+```
+
+# Challenges with the Methodology of This Survey
+
+Designing a survey ideally involves achieving balanced representation across various demographics. For instance, a completely randomized design might target equal participation among all races, genders, and sexual orientations. However, our survey, based on voluntary participation, poses certain challenges. While this approach is ethical, especially considering the sensitive nature of the topics, it introduces the potential for response bias. To understand the extent of this bias, consider the proportion of participants who identify as straight, white, male or females.
+
+```{r}
+# Extract the number of completed surveys
+sample_size <- nrow(completed_surveys)
+
+# Count of White Respondents
+w <- subset(completed_surveys, Q32 == "White")
+w_count <- round((nrow(w)/sample_size)*100, 2)
+
+# Count of Straight Respondents
+s <- subset(completed_surveys, Q33 == "Straight (Heterosexual)")
+s_count <- round((nrow(s)/sample_size)*100, 2)
+
+# Count of Cisgender Respondents
+cis <- subset(completed_surveys, Q34 == "Woman or Female" | Q34 == "Man or Male")
+c_count <- round((nrow(cis)/sample_size)*100, 2)
+
+# Count of Non-Cis Respondents
+noncisresp <- sample_size - nrow(cis)
+  
+# Count of Straight, White, Cisgender Respondents
+swc <- subset(completed_surveys, 
+                        Q32 == "White" &
+                        Q33 == "Straight (Heterosexual)" &
+                        (Q34 == "Woman or Female" | Q34 == "Man or Male"))
+swc_count <- round((nrow(swc)/sample_size)*100, 2)
+
+# Create a data frame for the table
+statistics_df <- data.frame(
+  Category = c("White Respondents", 
+               "Straight Respondents", 
+               "Cisgender Respondents", 
+               "Straight, White, Cisgender Respondents"),
+  Percentage = c(w_count, s_count, c_count, swc_count)
+)
+
+# Use knitr::kable to create a table
+knitr::kable(statistics_df, format = "markdown", row.names = FALSE)
+```
+
+**Total Completed Responses:** `r sample_size`
+
+In this survey, a substantial portion of responses originates from what we have termed "comparison groups"[^1]. As our analysis involves over 8 identity categories across various demographics, ideally, each group should be similarly represented. However, this is not the case, thereby necessitating a careful approach in our analysis.
+
+[^1]: Here, 'comparison groups' refer to straight, white, and/or cisgender individuals. This designation is not a philosophical statement but a practical decision. In the 2020 version of this survey, the original researchers grouped identities into "non-heterosexuals", "non-white", etc., due to data sparsity. Our use of 'comparison groups' follows this precedent but is not meant to imply any inherent normativity.
+
+Moreover, our approach must be mindful of several factors:
+
+1.  **Changing Demographics:** University demographics are evolving, with each new class reportedly more diverse than the last. This continuous change suggests that our sample might not accurately reflect the current student body, and thus we should not rely on parametric assumptions.
+
+2.  **Small Sample Sizes:** In some categories, the response count is as low as one. Such small sizes call for careful statistical treatment.
+
+3.  **Voluntary Survey Challenges:** Participants in voluntary surveys might hesitate to disclose sensitive information, particularly concerning race, gender, and sexual orientation. This reticence can impact the reliability of responses.
+
+Despite these challenges, our goal is to derive meaningful insights from the data, recognizing its limitations but also its potential to inform our understanding of the Tulane community. Here are a some further displays of the data spread...
+
+```{r}
+# Columns for which to create bar plots
+columns <- c("Q31", "Q32", "Q33", "Q34", "Q36")
+desired_order_Q31 <- c("First Year", "Second Year", "Third Year", "Fourth Year", "Fifth year +")
+
+suppressWarnings({
+  for (col in columns) {
+    # Filter out NA, empty string values, and the specific unwanted response in Q36
+    data_filtered <- usable_data %>%
+                     filter(!is.na(!!sym(col)) & !!sym(col) != "") %>%
+                     filter(!(col == "Q36" & !!sym(col) == "I don't feel comfortable answering this question"))
+    
+    # Get counts for the legend
+    counts <- data_filtered %>%
+              group_by(!!sym(col)) %>%
+              summarise(Count = n()) %>%
+              ungroup() %>%
+              mutate(col = as.factor(!!sym(col)))  # Make sure the grouping variable is a factor
+    
+    # If the column is Q31, set the factor levels to the desired order
+    if (col == "Q31") {
+      counts$col <- factor(counts$col, levels = desired_order_Q31)
+    }
+
+    # Find the corresponding demographic text
+    demographic_text <- demographic_dictionary$DemographicText[demographic_dictionary$DemographicCode == col]
+
+    # Create the bar plot with a unique fill color for each bar and remove the x-axis text
+    p <- ggplot(counts, aes(x = col, y = Count, fill = col)) +
+      geom_bar(stat = "identity") +
+      scale_fill_manual(values = rainbow(n = length(counts$Count))) +
+      labs(title = paste("Demographic:", demographic_text), x = "", y = "Count") +
+      theme_minimal() +
+      theme(plot.margin = margin(t = 50, r = 10, b = 20, l = 10),
+            axis.text.x = element_blank(),
+            axis.ticks.x = element_blank(),
+            legend.position = "bottom",
+            legend.title = element_blank())  # Remove legend title
+
+    # Print the plot
+    print(p)
+  }
+})
+```
+
+Now, we begin our analysis... all significance is evaluated at the $\alpha = 0.05$ level.
+
+# 1. Does race/gender identity/sexual orientation have an impact on which chief complaints people are unwilling to call for?
+
+```{r, results='hide'}
+# Define chief complaint questions
+chief_complaints <- c("Q19_1", "Q19_2", "Q19_3", "Q19_4", "Q20_1", "Q20_2", "Q20_3", "Q20_4",
+                      "Q21_1", "Q21_2", "Q21_3", "Q21_4", "Q22_1", "Q22_2", "Q22_3", "Q22_4",
+                      "Q23_1", "Q23_2", "Q23_3", "Q23_4")
+
+# Convert chief complaint variables to factors
+usable_data <- usable_data %>%
+  mutate(across(all_of(chief_complaints), factor))
+
+# Run ordinal logistic regression for each chief complaint question
+results <- list()
+for (complaint in chief_complaints) {
+    formula <- as.formula(paste(complaint, "~ Q32 + Q33 + Q34"))  # Demographic variables as predictors
+    model <- polr(formula, data = usable_data, Hess = TRUE)
+    results[[complaint]] <- model
+}
+
+# Function to extract coefficients, standard errors, t-values, and p-values
+extract_model_info <- function(model) {
+    summary_model <- summary(model)
+    coef_table <- coef(summary_model)
+    estimates <- coef_table[, "Value"]
+    std_errors <- coef_table[, "Std. Error"]
+    t_values <- estimates / std_errors
+    p_values <- 2 * pnorm(-abs(t_values))
+    results_table <- data.frame(Estimate = estimates, StdError = std_errors, tValue = t_values, PValue = p_values)
+    return(results_table)
+}
+
+# Function to summarize significant results
+summarize_significant_results <- function(model, complaint, significance_level = 0.05) {
+    model_info <- extract_model_info(model)
+    significant_results <- model_info[model_info$PValue < significance_level, ]
+    
+    if (nrow(significant_results) > 0) {
+        output <- paste("Chief Complaint:", complaint, "\nSignificant Predictors:\n")
+        for (row in 1:nrow(significant_results)) {
+            predictor_name <- rownames(significant_results)[row]
+            estimate <- round(significant_results[row, "Estimate"], 3)
+            p_value <- round(significant_results[row, "PValue"], 50)
+            line <- paste(predictor_name, "Estimate:", estimate, "P-Value:", p_value, "\n")
+            output <- paste(output, line, sep = "")
+        }
+    } else {
+        output <- paste("Chief Complaint:", complaint, "\nNo significant predictors at p <", significance_level, "\n")
+    }
+    
+    return(output)
+}
+
+# Apply the summary function to each model and print the summary
+for (i in 1:length(chief_complaints)) {
+    complaint <- chief_complaints[i]
+    model <- results[[complaint]]
+    summary <- summarize_significant_results(model, complaint)
+    cat(summary, "\n")
+}
+```
+
+To investigate whether race, gender identity, or sexual orientation impacts the likelihood of individuals being unwilling to call for help in various emergency situations, a comprehensive statistical analysis was conducted. This analysis involved the application of ordinal logistic regression to assess the influence of demographic variables on the responses to different emergency scenarios. Of the data, the following was significant...
+
+1.  Minor Medical Emergency:
+
+-   Sexual orientation showed a significant impact on the likelihood of calling for Tulane EMS. Non-Heterosexual individuals were less likely to call compared to Heterosexual individuals.
+
+-   Gender identity had a significant effect on taking alternative transportation to see a doctor, with Women or Female individuals being more likely to take this action.
+
+2.  Psychological Emergency:
+
+-   Significant differences were observed based on sexual orientation in the likelihood of calling for Tulane EMS. Non-Heterosexual individuals were less likely to call compared to Heterosexual individuals.
+
+3.  Ingestion Emergency:
+
+-   Year at Tulane (student's year) showed significant differences in the likelihood of calling for Tulane EMS, but without a consistent trend across different years.
+
+-   Gender identity impacted the likelihood of taking alternative transportation to see a doctor, with Non-Cisgender and Women or Female individuals being more likely to take this action.
+
+4.  Cardiovascular Emergency:
+
+-   Year at Tulane influenced the likelihood of calling for Tulane EMS for a cardiovascular emergency, with Fourth-Year students being less likely to call compared to First-Year students.
+
+Now we will take a deeper dive into the reasons why the significant groups differed in their responses. We will do this by looking at both the relative frequencies and written responses of factors which influenced decision making. Note, these are all hypothetical scenarios where participants were asked to rate their liklihood of taking different actions rather than any sort of actualization.
+
+```{r}
+filter_responses <- function(data, questions, demo, demo_value) {
+  # Filter data for the specific demographic group
+  demo_filtered_data <- data[data[[demo]] == demo_value, ]
+
+  # Select non-empty responses in the demographic group
+  non_empty_responses <- demo_filtered_data[apply(demo_filtered_data[questions], 1, function(x) any(x != "")), questions]
+
+  # Return the filtered responses
+  return(non_empty_responses)
+}
+
+# Columns for questions
+questions_minor_medical <- c("Q25_1", "Q25_2", "Q25_3", "Q25_4", "Q25_5", "Q25_6", "Q25_7", "Q25_8")
+questions_psychological <- c("Q26_1", "Q26_2", "Q26_3", "Q26_4", "Q26_5", "Q26_6", "Q26_7", "Q26_8")
+questions_ingestion <- c("Q27_1", "Q27_2", "Q27_3", "Q27_4", "Q27_5", "Q27_6", "Q27_7", "Q27_8")
+questions_cardiovascular <- c("Q28_1", "Q28_2", "Q28_3", "Q28_4", "Q28_5", "Q28_6", "Q28_7", "Q28_8")
+
+# Filter responses
+responses_minor_medical_non_heterosexual <- filter_responses(usable_data, questions_minor_medical, "Q33", "Non-Heterosexual")
+responses_minor_medical_women_female <- filter_responses(usable_data, questions_minor_medical, "Q34", "Woman or Female")
+
+responses_psychological_non_heterosexual <- filter_responses(usable_data, questions_psychological, "Q33", "Non-Heterosexual")
+
+responses_ingestion_non_cisgender <- filter_responses(usable_data, questions_ingestion, "Q34", "Non-Cisgender")
+responses_ingestion_women_female <- filter_responses(usable_data, questions_ingestion, "Q34", "Woman or Female")
+
+responses_cardiovascular_fourth_year <- filter_responses(usable_data, questions_cardiovascular, "Q31", "Fourth Year")
+
+# Mapping of question codes to response options
+response_options <- c("Q25_1" = "Lack of Trust",
+                      "Q25_2" = "Previous Neg. Experience",
+                      "Q25_3" = "Don't Want An EMT I Know",
+                      "Q25_4" = "Police Involvement",
+                      "Q25_5" = "Tulane/Housing Involvement",
+                      "Q25_6" = "Don't Know How to Call TEMS",
+                      "Q25_7" = "Prefer NOEMS",
+                      "Q25_8" = "Other",
+                      "Q26_1" = "Lack of Trust",
+                      "Q26_2" = "Previous Neg. Experience",
+                      "Q26_3" = "Don't Want An EMT I Know",
+                      "Q26_4" = "Police Involvement",
+                      "Q26_5" = "Tulane/Housing Involvement",
+                      "Q26_6" = "Don't Know How to Call TEMS",
+                      "Q26_7" = "Prefer NOEMS",
+                      "Q26_8" = "Other",
+                      "Q27_1" = "Lack of Trust",
+                      "Q27_2" = "Previous Neg. Experience",
+                      "Q27_3" = "Don't Want An EMT I Know",
+                      "Q27_4" = "Police Involvement",
+                      "Q27_5" = "Tulane/Housing Involvement",
+                      "Q27_6" = "Don't Know How to Call TEMS",
+                      "Q27_7" = "Prefer NOEMS",
+                      "Q27_8" = "Other",
+                      "Q28_1" = "Lack of Trust",
+                      "Q28_2" = "Previous Neg. Experience",
+                      "Q28_3" = "Don't Want An EMT I Know",
+                      "Q28_4" = "Police Involvement",
+                      "Q28_5" = "Tulane/Housing Involvement",
+                      "Q28_6" = "Don't Know How to Call TEMS",
+                      "Q28_7" = "Prefer NOEMS",
+                      "Q28_8" = "Other")
+
+
+# Function to create bar plots for responses
+create_bar_plot <- function(data, title) {
+  # Count the number of non-empty responses for each question
+  response_counts <- colSums(data != "")
+  
+  # Convert to a data frame for ggplot
+  df <- data.frame(Question = names(response_counts), Count = response_counts)
+  
+  # Create the bar plot
+  ggplot(df, aes(x = Question, y = Count)) +
+    geom_bar(stat = "identity", fill = "purple") +
+    theme_minimal() +
+    labs(title = title, x = "Response Option", y = "Count") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+}
+
+
+# Update the create_bar_plot function to use response options as x-axis labels and order them
+create_bar_plot <- function(data, title) {
+  # Count the number of non-empty responses for each question
+  response_counts <- colSums(data != "")
+  
+  # Map the question codes to response options
+  response_labels <- names(response_counts)
+  response_labels <- response_options[response_labels]
+
+  # Convert to a data frame for ggplot
+  df <- data.frame(Question = response_labels, Count = response_counts)
+
+  # Order the response options
+  ordered_responses <- c("Lack of Trust", "Previous Neg. Experience", "Don't Want An EMT I Know", 
+                         "Police Involvement", "Tulane/Housing Involvement", "Don't Know How to Call TEMS", 
+                         "Prefer NOEMS", "Other")
+  df$Question <- factor(df$Question, levels = ordered_responses)
+  
+  # Create the bar plot
+  ggplot(df, aes(x = Question, y = Count)) +
+    geom_bar(stat = "identity", fill = "purple") +
+    theme_minimal() +
+    labs(title = title, x = "", y = "Count") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+}
+
+# Generate bar plots for each set of responses
+plot_minor_medical_non_heterosexual <- create_bar_plot(responses_minor_medical_non_heterosexual, "Minor Medical Emergency Responses: Non-Heterosexual")
+plot_minor_medical_women_female <- create_bar_plot(responses_minor_medical_women_female, "Minor Medical Emergency Responses: Women or Female")
+
+plot_psychological_non_heterosexual <- create_bar_plot(responses_psychological_non_heterosexual, "Psychological Emergency Responses: Non-Heterosexual")
+
+plot_ingestion_non_cisgender <- create_bar_plot(responses_ingestion_non_cisgender, "Ingestion Emergency Responses: Non-Cisgender")
+plot_ingestion_women_female <- create_bar_plot(responses_ingestion_women_female, "Ingestion Emergency Responses: Women or Female")
+
+plot_cardiovascular_fourth_year <- create_bar_plot(responses_cardiovascular_fourth_year, "Cardiovascular Emergency Responses: Fourth Year")
+
+# Print plot and then print responses from Q25_8_TEXT for Non-Heterosexual
+print(plot_minor_medical_non_heterosexual)
+knitr::kable(data.frame(Response = usable_data$Q25_8_TEXT[usable_data$Q33 == "Non-Heterosexual" & usable_data$Q25_8_TEXT != ""]), caption = "Responses Labeled 'Other' for Non-Heterosexual")
+
+# Print plot and then print responses from Q25_8_TEXT for Woman or Female
+print(plot_minor_medical_women_female)
+knitr::kable(data.frame(Response = usable_data$Q25_8_TEXT[usable_data$Q34 == "Woman or Female" & usable_data$Q25_8_TEXT != ""]), caption = "Responses Labeled 'Other' for Woman or Female")
+
+# Print plot and then print responses from Q26_8_TEXT for Non-Heterosexual
+print(plot_psychological_non_heterosexual)
+knitr::kable(data.frame(Response = usable_data$Q26_8_TEXT[usable_data$Q33 == "Non-Heterosexual" & usable_data$Q26_8_TEXT != ""]), caption = "Responses Labeled 'Other' for Non-Heterosexual")
+
+# Print plot and then print responses from Q27_8_TEXT for Non-Cisgender
+print(plot_ingestion_non_cisgender)
+knitr::kable(data.frame(Response = usable_data$Q27_8_TEXT[usable_data$Q34 == "Non-Cisgender" & usable_data$Q27_8_TEXT != ""]), caption = "Responses Labeled 'Other' for Non-Cisgender")
+
+# Print plot and then print responses from Q27_8_TEXT for Woman or Female
+print(plot_ingestion_women_female)
+knitr::kable(data.frame(Response = usable_data$Q27_8_TEXT[usable_data$Q34 == "Woman or Female" & usable_data$Q27_8_TEXT != ""]), caption = "Responses Labeled 'Other' for Woman or Female")
+
+# Print plot and then print responses from Q28_8_TEXT for Fourth Year
+print(plot_cardiovascular_fourth_year)
+knitr::kable(data.frame(Response = usable_data$Q28_8_TEXT[usable_data$Q31 == "Fourth Year" & usable_data$Q28_8_TEXT != ""]), caption = "Responses Labeled 'Other' for Fourth Year")
+```
+
+# 2. Does getting rejected from TEMS make you less likely to call for help?
+
+```{r, results='hide'}
+# Adding a new column for TEMS application status
+usable_data <- usable_data %>%
+  mutate(TEMS_Status = case_when(
+    Q9 == "Yes" & Q10 == "No" ~ "Rejected",
+    Q9 == "Yes" & Q10 == "Yes" ~ "Accepted",
+    Q9 == "No" ~ "Neither"
+  ))
+
+# Convert TEMS_Status to a factor
+usable_data$TEMS_Status <- factor(usable_data$TEMS_Status)
+
+# Define chief complaint questions
+chief_complaints <- c("Q19_1", "Q19_2", "Q19_3", "Q19_4", "Q20_1", "Q20_2", "Q20_3", "Q20_4",
+                      "Q21_1", "Q21_2", "Q21_3", "Q21_4", "Q22_1", "Q22_2", "Q22_3", "Q22_4",
+                      "Q23_1", "Q23_2", "Q23_3", "Q23_4")
+
+# Convert chief complaint variables to factors
+usable_data <- usable_data %>%
+  mutate(across(all_of(chief_complaints), factor))
+
+# Run ordinal logistic regression for each chief complaint question
+results <- list()
+for (complaint in chief_complaints) {
+    formula <- as.formula(paste(complaint, "~ TEMS_Status"))  # TEMS application status as predictor
+    model <- polr(formula, data = usable_data, Hess = TRUE)
+    results[[complaint]] <- model
+}
+
+# Function to extract coefficients, standard errors, t-values, and p-values
+extract_model_info <- function(model) {
+    summary_model <- summary(model)
+    coef_table <- coef(summary_model)
+    estimates <- coef_table[, "Value"]
+    std_errors <- coef_table[, "Std. Error"]
+    t_values <- estimates / std_errors
+    p_values <- 2 * pnorm(-abs(t_values))
+    results_table <- data.frame(Estimate = estimates, StdError = std_errors, tValue = t_values, PValue = p_values)
+    return(results_table)
+}
+
+# Function to summarize significant results
+summarize_significant_results <- function(model, complaint, significance_level = 0.05) {
+    model_info <- extract_model_info(model)
+    significant_results <- model_info[model_info$PValue < significance_level, ]
+    
+    if (nrow(significant_results) > 0) {
+        output <- paste("Chief Complaint:", complaint, "\nSignificant Predictors:\n")
+        for (row in 1:nrow(significant_results)) {
+            predictor_name <- rownames(significant_results)[row]
+            estimate <- round(significant_results[row, "Estimate"], 3)
+            p_value <- round(significant_results[row, "PValue"], 50)
+            line <- paste(predictor_name, "Estimate:", estimate, "P-Value:", p_value, "\n")
+            output <- paste(output, line, sep = "")
+        }
+    } else {
+        output <- paste("Chief Complaint:", complaint, "\nNo significant predictors at p <", significance_level, "\n")
+    }
+    
+    return(output)
+}
+
+# Apply the summary function to each model and print the summary
+for (i in 1:length(chief_complaints)) {
+    complaint <- chief_complaints[i]
+    model <- results[[complaint]]
+    summary <- summarize_significant_results(model, complaint)
+    cat(summary, "\n")
+}
+```
+
+To determine whether the status of an application to Tulane EMS (accepted, rejected, or neither) influences the likelihood of calling for help in various emergency scenarios, an in-depth statistical analysis using ordinal logistic regression was conducted. This analysis evaluated the impact of TEMS application status on responses to different chief complaint questions. The following are the significant results...
+
+1.  Minor Traumatic Emergency:
+
+-   Individuals with no history of applying to TEMS were less likely to choose self-care compared to those who had applied.
+
+2.  Minor Medical Emergency:
+
+-   Both rejected applicants and those who never applied to TEMS were less likely to consider calling TEMS for help.
+
+3.  Psychological Emergency:
+
+-   For the question "Call for Tulane EMS for a psychological emergency" (Q21_2) and "Care for yourself for a psychological emergency" (Q21_4), non-applicants and rejected applicants were less likely to opt for these choices.
+
+4.  Ingestion Emergency:
+
+-   Non-applicants and rejected applicants showed a higher inclination to call 911 in contrast to accepted applicants.
+
+The analysis indicates that the TEMS application status can influence the decision-making process in emergency situations, highlighting the varied perceptions and trust levels towards the EMS system among different groups.[^2]
+
+[^2]: Here, I have omitted filtering the data and generating graphs since it is very time consuming to do this in R, if you end up wanting to evaluate these graphs, I recommend using python. It could be valuable to look at them, ggplot2 just started to break my soul so I shifted my focus on the analysis itself opposed to the visualization.
+
+# 3. Does race/gender identity/sexual orientation have an impact on opinions of TEMS?
+
+```{r, results='hide'}
+# Importing the complete data file
+raw_data <- read.csv("/Users/graysonmeckfessel/desktop/repos/diversity-survey/Analysis/raw_data_complete_2023.csv")
+
+# Filtering out incomplete surveys according to "survey ends" criteria
+completed_surveys <- subset(raw_data, 
+                        Progress == "100" &
+                        Finished == "True" &
+                        Q1 == "I understand the consent form and consent to participate in this survey" &
+                        (Q2 == "Undergraduate Student" | Q2 == "Graduate Student") &
+                        Q3 == "Yes" &
+                        Q4 == "Yes")
+
+# Re-code chief complaint questions
+completed_surveys <- completed_surveys %>%
+  mutate(across(c(Q19_1, Q19_2, Q19_3, Q19_4, Q20_1, Q20_2, Q20_3, Q20_4, Q21_1, 
+                  Q21_2, Q21_3, Q21_4, Q22_1, Q22_2, Q22_3, Q22_4, Q23_1, Q23_2, 
+                  Q23_3, Q23_4),
+                ~ case_when(
+                    . == "Very unlikely" ~ 1,
+                    . == "Unlikely" ~ 2,
+                    . == "About as likely as not" ~ 3,
+                    . == "Likely" ~ 4,
+                    . == "Very likely" ~ 5,
+                    TRUE ~ NA_real_)))  # Handle other cases as NA
+
+# Converting Demographically Data For Increased Usability
+usable_data <- completed_surveys %>%
+  mutate(
+    Q32 = ifelse(Q32 == "White", "White", "Non-White"),
+    Q33 = ifelse(Q33 == "Straight (Heterosexual)", "Heterosexual", "Non-Heterosexual"),
+    Q34 = ifelse(Q34 %in% c("Man or Male", "Woman or Female"), Q34, "Non-Cisgender"),
+    Q36 = ifelse(Q36 == "Yes", "International Student", "Non-International Student")
+  )
+
+# Define Q30 questions
+Q30_questions <- c("Q30_1", "Q30_2", "Q30_3", "Q30_4", "Q30_5", "Q30_6")
+
+# Convert Q30 questions to ordered factors
+usable_data <- usable_data %>%
+  mutate(across(all_of(Q30_questions), ~factor(case_when(
+    . == "Strongly disagree" ~ "1",
+    . == "Disagree" ~ "2",
+    . == "Neutral" ~ "3",
+    . == "Agree" ~ "4",
+    . == "Strongly agree" ~ "5"
+  ), levels = c("1", "2", "3", "4", "5"), ordered = TRUE)))
+
+# Run ordinal logistic regression for each Q30 question
+Q30_results <- list()
+for (question in Q30_questions) {
+    formula <- as.formula(paste(question, "~ Q32 + Q33 + Q34 + Q31")) # Including Q31 for year
+    model <- polr(formula, data = usable_data, Hess = TRUE)
+    Q30_results[[question]] <- model
+}
+
+# Summarize results for each Q30 question
+for (i in 1:length(Q30_questions)) {
+    question <- Q30_questions[i]
+    model <- Q30_results[[question]]
+    summary <- summarize_significant_results(model, question)
+    cat(summary, "\n")
+}
+```
+
+To assess whether demographic factors such as race, gender identity, and sexual orientation influence perceptions of Tulane EMS members, an in-depth statistical analysis using ordinal logistic regression was executed. This analysis examined the impact of these demographic variables on responses to questions about Tulane EMS members' social inclusivity, trustworthiness, kindness, cliquey-ness, social exclusivity, and rudeness.[^3] Here are the significant results...
+
+1. Social Inclusivity:
+
+-   Race (White): A significant predictor with an estimate of 0.379 (p-value: 0.014). This suggests that being White is associated with a higher likelihood of agreeing that Tulane EMS members are socially inclusive.
+
+-   Gender Identity (Non-Cisgender): A significant negative predictor with an estimate of -1.148 (p-value: 0.003). Non-Cisgender individuals are less likely to perceive Tulane EMS members as socially inclusive.
+
+2. Social Trustworthiness:
+
+-   Gender Identity (Non-Cisgender): A significant negative predictor with an estimate of -1.177 (p-value: 0.003). Non-Cisgender individuals are less likely to agree that Tulane EMS members are socially trustworthy.
+
+3. Kindness:
+
+-   Gender Identity (Non-Cisgender): A significant negative predictor with an estimate of -1.07 (p-value: 0.007). This indicates that Non-Cisgender individuals are less likely to agree that Tulane EMS members are kind.
+
+[^3]: The significant results here are not two-way... ie the fact that white people view TEMS as socially inclusive does not imply that non-white people believe the opposite. The lack of significance means no conclusion can be drawn from all other hypotheses assessed.
+
+# Practically Relevant Results and Suggested Action:
+
+First off, the outputs in the Rmd file with the code included are a little messy, so if you need me to interpret any p-values or anything beyond this results section, please let me know. The p-values are in the file with the outputs included. I didn't make it more presentable because I didn't know how much of this was going to be used so I figured it wasn't a good use of time to be a perfectionist. However, here are my take aways from the analysis...
+
+## CCC Questions vs. Demographic Data
+
+1.  Minor Medical Emergency: Though significance was observed here with respect to non-heterosexuals and women/females, the graphs and text responses illustrate how a vast amount of respondents think it's just not that urgent to call TEMS for this.
+
+-   SUGGESTED ACTION: Nothing. Many minor medical emergencies do not require EMS.
+
+2.  Psychological Emergency: Non-Heterosexual individuals were less likely to call TEMS compared to Heterosexual individuals. After reviewing the text responses and graphs, it is evident that many people within this group have varied reasons for preferring alternative care ranging from a lack of trust to personal preference with alternative resources.
+
+-   SUGGESTED ACTION: Implement robust psychiatric emergency training run by outside professional organizations and advertise to the community that this training is being implemented. This should at the minimum present a better imagine of the competency of the EMTs in TEMS (something that was a concern for many respondents).
+
+3.  Ingestion Emergency: Non-Cisgender people and Women/Female individuals were more likely to take alternative means of transportation to a hospital. After reviewing the responses, it is evident that fear of police and tulane housing involvement played a large role in this decision.
+
+-   SUGGESTED ACTION: Work with university administration to ensure punishments for over-intoxication are not stringent to the point where people will opt out of taking life saving measures.
+
+4.  Cardiovascular Emergency: Fourth-Year students were less likely to call TEMS compared to First-Years. A large amount of respondents preferred NOEMS over TEMS for such emergencies.
+
+-   SUGGESTED ACTION: Nothing. NOEMS is far more equipped to handle such emergencies and fourth years typically know the city of New Orleans more than first years, which may be why they opt for a different EMS service. Thus, it may just be a natural and unavoidable patient preference. 
+
+## CCC Questions vs. Application Status
+
+For this section, I have avoided drawing conclusions or making suggestions. This is because it may be overreaching to draw causal relationships between application status and decisions in an emergency for the significant results. It is logical that there would be many more factors that would influence someone's decision prior to some deep vendetta against the organization. A large clue that the results should be handled this way is in the fact that, for the most part, people who had no application history often behaved identically to those that were rejected. Here are the significant results from this section once more...
+
+1.  Minor Traumatic Emergency: Individuals with no history of applying to TEMS were less likely to choose self-care compared to those who had applied.
+
+2.  Minor Medical Emergency: Both rejected applicants and those who never applied to TEMS were less likely to consider calling TEMS for help.
+
+3.  Psychological Emergency: For the question "Call for Tulane EMS for a psychological emergency" and "Care for yourself for a psychological emergency", non-applicants and rejected applicants were less likely to opt for these choices.
+
+4.  Ingestion Emergency: Non-applicants and rejected applicants showed a higher inclination to call 911 in contrast to accepted applicants.
+
+## Perceptions vs. Demographic Data
+
+The results of the perception data are interesting because most of the significant results originated from the participants who identified themselves as non-cisgender. Non-cisgender individuals were less likely to find TEMS members socially inclusive, socially trustworthy, and kind. This is an interesting finding because the presence of significance in one demographic across multiple negative perceptions may suggest a true causal relationship. However, we need to recall that there may be bias in the data given the disproportionate sample sizes...
+
+Number of Cisgender Respondents: `r sample_size-noncisresp`
+
+Number of Non-Cisgender Respondents: `r noncisresp`
+
+-   SUGGESTED ACTION: Conduct a follow-up study to evaluate the connection between perceptions of TEMS and gender identity. This should be done by developing an experimental design with equal numbers of participants across demographic factors. This will provide a more reliable way to analyze the data and draw causal connections. 
